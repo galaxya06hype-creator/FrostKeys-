@@ -48,7 +48,7 @@ android {
         }
         externalNativeBuild {
             ndkBuild {
-                arguments.add("-j1")
+                arguments.add("-j4")
             }
         }
         proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
