@@ -632,6 +632,11 @@ public class LatinIME extends InputMethodService implements
                 if (helium314.keyboard.latin.settings.Settings.PREF_FROSTED_GLASS_TRIGGER.equals(key)) {
                     Log.d(TAG, "Hard Reset trigger queued.");
                     requestFrostedHardThemeReset();
+                } else if (helium314.keyboard.latin.settings.Settings.PREF_BLUR_RENDER_OVERRIDE.equals(key)
+                        || helium314.keyboard.latin.settings.Settings.PREF_NATIVE_BACKGROUND_BLUR_ONLY.equals(key)) {
+                    // These keys don't start with "pref_frosted_" but still change rendering: hard reset.
+                    Log.d(TAG, "Hard Reset trigger queued for: " + key);
+                    requestFrostedHardThemeReset();
                 } else if (key.startsWith("pref_frosted_")) {
                     Log.d(TAG, "Live Redraw trigger queued for: " + key);
                     requestFrostedLivePreviewRefresh();
@@ -669,6 +674,13 @@ public class LatinIME extends InputMethodService implements
                 }
             });
             return;
+        }
+        // Flush a pending live redraw first: otherwise the last slider delta
+        // is silently eaten and the adjust dialog looks like it "does nothing".
+        if (mFrostedLiveRedrawDirty) {
+            mFrostedLiveRedrawDirty = false;
+            mFrostedPrefsHandler.removeCallbacks(mApplyLiveFrostedRedraw);
+            mApplyLiveFrostedRedraw.run();
         }
         mFrostedPrefsHandler.removeCallbacks(mApplyLiveFrostedRedraw);
         mFrostedPrefsHandler.removeCallbacks(mApplyHardFrostedReset);
@@ -2373,7 +2385,16 @@ public class LatinIME extends InputMethodService implements
         if (window == null)
             return;
         mOriginalNavBarColor = window.getNavigationBarColor();
-        window.setNavigationBarColor(color);
+        // Frosted glass already tints the keyboard area itself (incl. the nav padding);
+        // painting the nav bar opaque blue on top of it looks like a blue strip.
+        if (helium314.keyboard.latin.FrostedGlassHelper.isFrostedTheme(this)) {
+            window.setNavigationBarColor(android.graphics.Color.TRANSPARENT);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                window.setNavigationBarContrastEnforced(false);
+            }
+        } else {
+            window.setNavigationBarColor(color);
+        }
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O)
             return;

@@ -297,12 +297,15 @@ fun createAdvancedSettings(context: Context) = listOf(
         )
     },
     Setting(context, Settings.PREF_BLUR_RENDER_OVERRIDE, R.string.pref_blur_render_override_title, R.string.pref_blur_render_override_summary) {
-        val items = listOf(
-            stringResource(R.string.blur_render_override_auto_entry) to "auto",
-            stringResource(R.string.blur_render_override_force_native_entry) to "force_native",
-            stringResource(R.string.blur_render_override_force_samsung_entry) to "force_samsung",
-            stringResource(R.string.blur_render_override_force_solid_entry) to "force_solid"
-        )
+        // SemBlurInfo exists only on Samsung: hide the option elsewhere so users
+        // don't pick a guaranteed-dead renderer (cheap non-Samsung phones included).
+        val isSamsung = Build.MANUFACTURER.equals("samsung", ignoreCase = true)
+        val items = buildList {
+            add(stringResource(R.string.blur_render_override_auto_entry) to "auto")
+            add(stringResource(R.string.blur_render_override_force_native_entry) to "force_native")
+            if (isSamsung) add(stringResource(R.string.blur_render_override_force_samsung_entry) to "force_samsung")
+            add(stringResource(R.string.blur_render_override_force_solid_entry) to "force_solid")
+        }
         ListPreference(it, items, Defaults.PREF_BLUR_RENDER_OVERRIDE) {
             KeyboardSwitcher.getInstance().setThemeNeedsReload()
         }

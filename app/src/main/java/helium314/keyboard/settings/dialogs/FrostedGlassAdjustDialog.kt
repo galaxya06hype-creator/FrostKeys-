@@ -80,7 +80,9 @@ fun FrostedGlassAdjustDialog(
     val prefs = context.prefs()
     val coroutineScope = rememberCoroutineScope()
 
-    var activeProfile by remember { mutableStateOf(if (helium314.keyboard.latin.utils.ResourceUtils.isNight(context.resources)) "dark" else "light") }
+    // Open on the same profile the keyboard engine currently uses (override-aware),
+    // otherwise the user edits Light while seeing Dark and thinks nothing works.
+    var activeProfile by remember { mutableStateOf(if (helium314.keyboard.keyboard.KeyboardTheme.isDarkThemeActive(context)) "dark" else "light") }
 
 
     // 1. Snapshot the initial state when the dialog opens
@@ -156,6 +158,9 @@ fun FrostedGlassAdjustDialog(
             .putFloat(Settings.PREF_FROSTED_DUST_ALPHA_NIGHT, values.dark.dustAlpha.coerceIn(1f, 10f))
             .putBoolean(Settings.PREF_FROSTED_DUST_ENABLED, values.dustEnabled)
             .apply()
+        // Prefs listeners update asynchronously; nudge the live IME directly so Save
+        // takes effect immediately instead of looking like it did nothing.
+        LatinIME.getInstance()?.requestFrostedHardThemeReset()
     }
 
     fun requestFinalFrostedSync() {
@@ -264,8 +269,10 @@ fun FrostedGlassAdjustDialog(
     val panelShape = MaterialTheme.shapes.extraLarge
     val surfaceColor = MaterialTheme.colorScheme.surface
     val panelTint = remember(surfaceColor) { surfaceColor.copy(alpha = 0.55f) }
-    val dialogHazeStyle = remember(panelTint) {
-        HazeStyle(blurRadius = 18.dp, tint = panelTint)
+    // Bind the dialog preview blur to the Blur Radius slider (10..150px -> Haze 0..72.dp)
+    // so the preview visibly reacts while dragging.
+    val dialogHazeStyle = remember(panelTint, currentValues.blurRadius) {
+        HazeStyle(blurRadius = (currentValues.blurRadius / 4).coerceIn(0, 72).dp, tint = panelTint)
     }
 
     Box(

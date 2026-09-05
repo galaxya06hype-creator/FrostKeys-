@@ -1,8 +1,14 @@
 package helium314.keyboard.latin
 
+import android.app.WallpaperManager
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.inputmethodservice.InputMethodService
 import android.os.Build
 import android.util.Log
@@ -303,6 +309,9 @@ object FrostedGlassHelper {
             clearNativeBlurReady(nativeState)
             windowsWithAppliedFrostedGlass.remove(window)
             applyDefaultBlur(service, window, false, force = true)
+            // Hiding must also drop Samsung state, or it haunts the next show.
+            clearSamsungSemBlur(samsungBlurTarget(inputView))
+            applySamsungLegacyBlur(window, false)
             Log.d(TAG, "Skipped frosted blur enable while IME input view is hidden.")
             return
         }
@@ -319,7 +328,7 @@ object FrostedGlassHelper {
                 clearSamsungSemBlur(samsungBlurTarget(inputView))
                 applySamsungLegacyBlur(window, false)
             }
-            applySolidFallbackBackground(service, window, inputView)
+            applySolidFallbackBackground(service, window, inputView, allowStaticBlur = overrideMode != "force_solid")
             windowsWithAppliedFrostedGlass.add(window)
             if (nativeBlurChanged) {
                 Log.i(TAG, "Frosted glass blur unavailable or forced solid. Applied opaque frosted fallback.")
@@ -330,8 +339,18 @@ object FrostedGlassHelper {
         when (overrideMode) {
             "force_native" -> {
                 restoreFrostedThemeBackground(service, inputView)
+                // Leaving Samsung state behind while enabling native causes double/tinted blur.
+                clearSamsungSemBlur(samsungBlurTarget(inputView))
+                applySamsungLegacyBlur(window, false)
                 if (applyNativeBlur(service, window, inputView, nativeState, generation)) {
                     Log.i(TAG, "OVERRIDE: Force Native Android Blur requested via window.setBackgroundBlurRadius.")
+                }
+                // Cheap phones silently ignore setBackgroundBlurRadius: give them the static look,
+                // and never leave a fully transparent window behind if that fails too.
+                if (!isSystemBlurAvailable(service)) {
+                    if (!applyStaticBlurToTarget(service, inputView)) {
+                        applySolidFallbackBackground(service, window, inputView, allowStaticBlur = false)
+                    }
                 }
             }
             "force_samsung" -> {
@@ -372,8 +391,17 @@ object FrostedGlassHelper {
                     }
                 } else {
                     restoreFrostedThemeBackground(service, inputView)
+                    clearSamsungSemBlur(samsungBlurTarget(inputView))
+                    applySamsungLegacyBlur(window, false)
                     if (applyNativeBlur(service, window, inputView, nativeState, generation)) {
                         Log.i(TAG, "AUTO: Non-Samsung device detected. Requested Native Android window blur.")
+                    }
+                    // OEM-disabled blur (typical cheap phones): fall back to the static look,
+                    // and never leave a fully transparent window behind if that fails too.
+                    if (!isSystemBlurAvailable(service)) {
+                        if (!applyStaticBlurToTarget(service, inputView)) {
+                            applySolidFallbackBackground(service, window, inputView, allowStaticBlur = false)
+                        }
                     }
                 }
             }
@@ -444,6 +472,11 @@ object FrostedGlassHelper {
         }
 
         try {
+            // A forced attempt means the user explicitly asked: forget transient past
+            // failures (e.g. view was 0x0 at the time) and try every mode again.
+            if (force) failedSamsungSemBlurModes.clear()
+            // Safety valve so the denylist can never grow unboundedly.
+            if (failedSamsungSemBlurModes.size > 16) failedSamsungSemBlurModes.clear()
             val candidates = SemBlurInfoReflect.cachedCandidates
 
             for (mode in candidates) {
@@ -491,6 +524,8 @@ object FrostedGlassHelper {
 
             if (usePreset) {
                 SemBlurInfoReflect.setColorCurvePresetMethod?.invoke(builder, samsungBlurPreset(context))
+                // A preset must not swallow the user's blur radius: apply it too.
+                SemBlurInfoReflect.setRadiusMethod?.invoke(builder, blurRadius(context))
             } else {
                 SemBlurInfoReflect.setRadiusMethod?.invoke(builder, blurRadius(context))
             }
@@ -900,7 +935,13 @@ object FrostedGlassHelper {
         target.invalidate()
     }
 
-    private fun applySolidFallbackBackground(context: Context, window: Window, inputView: View?) {
+    private fun applySolidFallbackBackground(context: Context, window: Window, inputView: View?, allowStaticBlur: Boolean = true) {
+        // Cheap phones with OEM-disabled live blur still deserve a frosted look:
+        // paint a one-time blurred wallpaper snapshot instead of flat opaque color.
+        if (allowStaticBlur && applyStaticBlurToTarget(context, inputView)) {
+            window.setBackgroundDrawable(roundedWindowBackground(context, Color.TRANSPARENT))
+            return
+        }
         val color = solidFallbackColor(context)
         window.setBackgroundDrawable(roundedWindowBackground(context, color))
         inputView?.setBackgroundColor(Color.TRANSPARENT)
@@ -910,6 +951,88 @@ object FrostedGlassHelper {
         }
     }
 
+    private var staticBlurCacheKey: String? = null
+    private var staticBlurCache: Bitmap? = null
+
+    /**
+     * One-shot frosted look for devices without live cross-window blur (typical cheap
+     * phones where the OEM disabled it). Blurs a downscaled wallpaper snapshot once and
+     * paints it under the user's tint color. Cheap: tiny bitmaps, cached by settings key.
+     */
+    private fun applyStaticBlurToTarget(context: Context, inputView: View?): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
+        val target = samsungBlurTarget(inputView) ?: return false
+        return try {
+            val appContext = context.applicationContext
+            val radius = blurRadius(appContext)
+            val tint = samsungBlurTint(appContext)
+            val night = isNight(appContext)
+            val key = buildString {
+                append(radius).append('|').append(tint).append('|').append(night)
+                append('|').append(keyboardCornerRadiusPx(appContext))
+                // Rebuild when the user changes wallpaper; the id lookup is cheap (no decode).
+                append('|').append(runCatching {
+                    (appContext.getSystemService(Context.WALLPAPER_SERVICE) as? WallpaperManager)
+                        ?.getWallpaperId(WallpaperManager.FLAG_SYSTEM)
+                }.getOrNull() ?: 0)
+            }
+            var blurred = if (key == staticBlurCacheKey) staticBlurCache?.takeIf { !it.isRecycled } else null
+            if (blurred == null) {
+                staticBlurCache?.recycle()
+                staticBlurCache = null
+                blurred = buildStaticBlurBitmap(appContext, target, radius) ?: return false
+                staticBlurCache = blurred
+                staticBlurCacheKey = key
+            }
+            val layers = LayerDrawable(arrayOf(
+                BitmapDrawable(appContext.resources, blurred),
+                ColorDrawable(tint)
+            ))
+            target.background = layers
+            target.invalidate()
+            Log.d(TAG, "Applied static wallpaper blur fallback (radius=$radius).")
+            true
+        } catch (e: Throwable) {
+            Log.w(TAG, "Static wallpaper blur failed; using solid fallback", e)
+            false
+        }
+    }
+
+    private fun buildStaticBlurBitmap(context: Context, target: View, radius: Int): Bitmap? {
+        val wm = context.getSystemService(Context.WALLPAPER_SERVICE) as? WallpaperManager ?: return null
+        val drawable = wm.drawable ?: return null
+        val metrics = context.resources.displayMetrics
+        val outW = (if (target.width > 0) target.width else metrics.widthPixels).coerceIn(1, 1080)
+        val outH = (if (target.height > 0) target.height else metrics.heightPixels / 3).coerceIn(1, 1080)
+        var iw = drawable.intrinsicWidth.takeIf { it > 0 } ?: outW
+        var ih = drawable.intrinsicHeight.takeIf { it > 0 } ?: outH
+        // Cap decode size: a small source is plenty for a blurred background.
+        val cap = 720f / maxOf(iw, ih).coerceAtLeast(1)
+        if (cap < 1f) {
+            iw = (iw * cap).toInt().coerceAtLeast(1)
+            ih = (ih * cap).toInt().coerceAtLeast(1)
+        }
+        val full = Bitmap.createBitmap(iw, ih, Bitmap.Config.ARGB_8888)
+        val fullCanvas = Canvas(full)
+        drawable.setBounds(0, 0, iw, ih)
+        drawable.draw(fullCanvas)
+        // Center-crop to the target aspect so the background doesn't stretch.
+        val coverScale = maxOf(outW / full.width.toFloat(), outH / full.height.toFloat())
+        val coverW = (full.width * coverScale).toInt().coerceAtLeast(outW)
+        val coverH = (full.height * coverScale).toInt().coerceAtLeast(outH)
+        val cover = Bitmap.createScaledBitmap(full, coverW, coverH, true)
+        if (cover !== full) full.recycle()
+        val cropped = Bitmap.createBitmap(cover, (coverW - outW) / 2, (coverH - outH) / 2, outW, outH)
+        if (cropped !== cover) cover.recycle()
+        // Fake gaussian blur: shrink tiny (radius controls strength), then enlarge with filtering.
+        val tinyW = (160 - (radius.coerceIn(0, 150) * 136 / 150)).coerceIn(24, 160)
+        val tinyH = (tinyW * outH / outW).coerceIn(24, 160)
+        val tiny = Bitmap.createScaledBitmap(cropped, tinyW, tinyH, true)
+        val blurred = Bitmap.createScaledBitmap(tiny, outW, outH, true)
+        tiny.recycle()
+        if (blurred !== cropped) cropped.recycle()
+        return blurred
+    }
     private fun solidFallbackColor(context: Context): Int {
         val baseColor = runCatching { KeyboardTheme.getColorsForCurrentTheme(context).get(ColorType.MAIN_BACKGROUND) }
             .getOrNull()
@@ -937,12 +1060,13 @@ object FrostedGlassHelper {
 
     private fun blurRadius(context: Context): Int {
         val isNight = isNight(context)
-        return helium314.keyboard.keyboard.KeyboardTheme.livePreviewValues?.blurRadius
+        // Clamp: Window.setBackgroundBlurRadius only accepts 0..150, stale prefs must never crash.
+        return (helium314.keyboard.keyboard.KeyboardTheme.livePreviewValues?.blurRadius
             ?: if (isNight) {
                 context.prefs().getInt(Settings.PREF_FROSTED_BLUR_RADIUS_NIGHT, Defaults.PREF_FROSTED_BLUR_RADIUS_NIGHT)
             } else {
                 context.prefs().getInt(Settings.PREF_FROSTED_BLUR_RADIUS, Defaults.PREF_FROSTED_BLUR_RADIUS)
-            }
+            }).coerceIn(0, 150)
     }
     /**
      * Computes the Samsung SemBlurInfo tint overlay color from user preferences.

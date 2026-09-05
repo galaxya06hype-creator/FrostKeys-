@@ -1547,7 +1547,16 @@ public final class EmojiPalettesView extends LinearLayout
             if (!fromScroll && mPager.getAdapter() instanceof EmojiPalettesAdapter) {
                 final int headerPos = ((EmojiPalettesAdapter) mPager.getAdapter()).getHeaderPositionOfCategory(categoryId);
                 if (headerPos != -1 && mPager.getLayoutManager() instanceof LinearLayoutManager) {
-                    ((LinearLayoutManager) mPager.getLayoutManager()).scrollToPositionWithOffset(headerPos, 0);
+                    // Tapping categories fast while the pager is still laying out must not crash.
+                    if (mPager.isComputingLayout() || mPager.getScrollState() != RecyclerView.SCROLL_STATE_IDLE) {
+                        mPager.post(() -> {
+                            if (mPager.getLayoutManager() instanceof LinearLayoutManager) {
+                                ((LinearLayoutManager) mPager.getLayoutManager()).scrollToPositionWithOffset(headerPos, 0);
+                            }
+                        });
+                    } else {
+                        ((LinearLayoutManager) mPager.getLayoutManager()).scrollToPositionWithOffset(headerPos, 0);
+                    }
                 }
             }
 

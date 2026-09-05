@@ -82,6 +82,10 @@ public final class AudioAndHapticFeedbackManager {
     }
 
     public void performAudioFeedback(final int code, final HapticEvent hapticEvent) {
+        // Taps can arrive before onSettingsChanged (e.g. rapid taps right after IME start).
+        if (mSettingsValues == null) {
+            return;
+        }
         // if mAudioManager is null, we can't play a sound anyway, so return
         if (mAudioManager == null) {
             return;
@@ -102,6 +106,9 @@ public final class AudioAndHapticFeedbackManager {
     }
 
     public void performHapticFeedback(final View viewToPerformHapticFeedbackOn, final HapticEvent hapticEvent) {
+        if (mSettingsValues == null) {
+            return;
+        }
         if (!mSettingsValues.mVibrateOn || (mDoNotDisturb && !mSettingsValues.mVibrateInDndMode)) {
             return;
         }

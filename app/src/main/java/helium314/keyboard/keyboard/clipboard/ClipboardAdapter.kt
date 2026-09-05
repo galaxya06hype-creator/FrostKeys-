@@ -210,17 +210,21 @@ class ClipboardAdapter(
         @SuppressLint("ClickableViewAccessibility")
         override fun onTouch(view: View, event: MotionEvent): Boolean {
             if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                keyEventListener.onKeyDown(view.tag as Long)
+                // Tag can be cleared by a concurrent clear/delete: never crash on it.
+                val id = view.tag as? Long ?: return false
+                keyEventListener.onKeyDown(id)
             }
             return false
         }
 
         override fun onClick(view: View) {
-            keyEventListener.onKeyUp(view.tag as Long)
+            val id = view.tag as? Long ?: return
+            keyEventListener.onKeyUp(id)
         }
 
         override fun onLongClick(view: View): Boolean {
-            clipboardHistoryManager?.toggleClipPinned(view.tag as Long)
+            val id = view.tag as? Long ?: return true
+            clipboardHistoryManager?.toggleClipPinned(id)
             return true
         }
     }

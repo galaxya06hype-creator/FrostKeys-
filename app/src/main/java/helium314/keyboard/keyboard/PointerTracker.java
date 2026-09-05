@@ -821,6 +821,10 @@ public final class PointerTracker implements PointerTrackerQueue.Element,
         if (sGestureEnabler.shouldHandleGesture() && me != null) {
             // Add historical points to gesture path.
             final int pointerIndex = me.findPointerIndex(mPointerId);
+            // Multi-finger up/down races can leave a stale pointer id: never index with -1.
+            if (pointerIndex < 0 || pointerIndex >= me.getPointerCount()) {
+                return;
+            }
             final int historicalSize = me.getHistorySize();
             for (int h = 0; h < historicalSize; h++) {
                 final int historicalX = (int)me.getHistoricalX(pointerIndex, h);

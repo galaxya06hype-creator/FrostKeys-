@@ -131,6 +131,14 @@ public final class ResizableIntArray {
      * @param elementCount how many elements to shift.
      */
     public void shift(final int elementCount) {
+        // Long/complex gestures racing with cancel can request bogus shifts: clamp, never crash.
+        if (elementCount <= 0) {
+            return;
+        }
+        if (elementCount >= mLength) {
+            mLength = 0;
+            return;
+        }
         System.arraycopy(mArray, elementCount, mArray, 0, mLength - elementCount);
         mLength -= elementCount;
     }

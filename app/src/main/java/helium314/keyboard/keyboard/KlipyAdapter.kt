@@ -53,7 +53,9 @@ class KlipyAdapter(
     }
 
     override fun getItemId(position: Int): Long {
-        return items[position].id.hashCode().toLong()
+        // -1L == RecyclerView.Adapter.NO_ID ("no stable id"); literal avoids a
+        // receiver-resolution quirk with the nested Java Adapter class.
+        return items.getOrNull(position)?.id?.hashCode()?.toLong() ?: -1L
     }
 
     override fun getItemViewType(position: Int): Int = VIEW_TYPE_MEDIA
@@ -130,7 +132,7 @@ class KlipyAdapter(
     fun setAnimationsRunning(running: Boolean) {
         if (areAnimationsRunning == running) return
         areAnimationsRunning = running
-        for (holder in activeViews) {
+        for (holder in activeViews.toList()) {
             val drawable = holder.imageView.drawable
             if (drawable is Animatable) {
                 if (running) {
@@ -196,7 +198,9 @@ class KlipyAdapter(
     }
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+        if (position !in items.indices) return
         val item = items[position]
+        val boundItemId = item.id
         holder.releasedWhileDetached = false
 
         // Prevent StaggeredGridLayoutManager from making items full-span
@@ -271,25 +275,28 @@ class KlipyAdapter(
 
         val runnable = Runnable {
             holder.pendingLoadRunnable = null
-            if (holder.bindingAdapterPosition == position) {
-                holder.imageView.load(imageUrl, loader) {
-                    scale(Scale.FIT)
-                    if (hasDimensions && targetWidth > 0 && targetHeight > 0) {
-                        size(targetWidth, targetHeight)
-                    }
-                    listener(
-                        onSuccess = { _, result ->
-                            val drawable = result.drawable
-                            if (drawable is Animatable) {
-                                if (areAnimationsRunning) {
-                                    drawable.start()
-                                } else {
-                                    drawable.stop()
-                                }
+            val currentPos = holder.bindingAdapterPosition
+            if (currentPos == RecyclerView.NO_POSITION || currentPos >= itemCount) return@Runnable
+            // The list may have changed while this load was delayed (paging/search);
+            // only load if the same item is still at this position.
+            if (items.getOrNull(currentPos)?.id != boundItemId) return@Runnable
+            holder.imageView.load(imageUrl, loader) {
+                scale(Scale.FIT)
+                if (hasDimensions && targetWidth > 0 && targetHeight > 0) {
+                    size(targetWidth, targetHeight)
+                }
+                listener(
+                    onSuccess = { _, result ->
+                        val drawable = result.drawable
+                        if (drawable is Animatable) {
+                            if (areAnimationsRunning) {
+                                drawable.start()
+                            } else {
+                                drawable.stop()
                             }
                         }
-                    )
-                }
+                    }
+                )
             }
         }
         holder.pendingLoadRunnable = runnable
@@ -304,9 +311,15 @@ class KlipyAdapter(
         setItemListeners(holder.itemView, item)
     }
 
+    // Guards against double-fire from rapid multi-tap on the same item.
+    private var lastItemClickUptimeMs = 0L
+
     private fun setItemListeners(view: View, item: KlipyHistoryDao.KlipyItem) {
         installTapAnimation(view)
         view.setOnClickListener {
+            val now = android.os.SystemClock.uptimeMillis()
+            if (now - lastItemClickUptimeMs < 300) return@setOnClickListener
+            lastItemClickUptimeMs = now
             AudioAndHapticFeedbackManager.getInstance().performHapticAndAudioFeedback(
                 KeyCode.NOT_SPECIFIED,
                 it,
@@ -382,6 +395,11 @@ class KlipyAdapter(
         super.onViewDetachedFromWindow(holder)
         activeViews.remove(holder)
         holder.releasedWhileDetached = true
+        // Stop any in-flight tap animation so a recycled view never keeps a stuck scale/alpha.
+        holder.itemView.animate().cancel()
+        holder.itemView.scaleX = 1f
+        holder.itemView.scaleY = 1f
+        holder.itemView.alpha = 1f
         releaseHolder(holder, clearImage = true, disposeRequest = true)
     }
 

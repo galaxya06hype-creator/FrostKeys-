@@ -590,11 +590,14 @@ class KlipyPalettesView @JvmOverloads constructor(
             KlipyHistoryDao.GIF_HISTORY_COLUMNS,
             StaggeredGridLayoutManager.VERTICAL
         ).apply {
-            gapStrategy = StaggeredGridLayoutManager.GAP_HANDLING_MOVE_ITEMS_BETWEEN_SPANS
+            // NONE: moving items between spans while scrolling is a known source of
+            // "Inconsistency detected" force-closes with variable-height cells.
+            gapStrategy = StaggeredGridLayoutManager.GAP_HANDLING_NONE
         }
         gifsRecyclerView.layoutManager = staggeredLayoutManager
         gifsRecyclerView.adapter = createHistoryConcatAdapter(gifsPage)
-        gifsRecyclerView.setItemViewCacheSize(2)
+        gifsRecyclerView.setHasFixedSize(false)
+        gifsRecyclerView.setItemViewCacheSize(6)
         gifsRecyclerView.addOnScrollListener(createPaginationScrollListener())
 
         val stickerLayoutManager = GridLayoutManager(context, KlipyHistoryDao.STICKER_HISTORY_COLUMNS)
@@ -611,8 +614,8 @@ class KlipyPalettesView @JvmOverloads constructor(
             }
         }
         stickersRecyclerView.itemAnimator = null // prevent ghosting with translucent backgrounds
-        stickersRecyclerView.setItemViewCacheSize(2)
-        stickersRecyclerView.setHasFixedSize(true)
+        stickersRecyclerView.setItemViewCacheSize(6)
+        stickersRecyclerView.setHasFixedSize(false)
         stickersRecyclerView.addOnScrollListener(createPaginationScrollListener())
     }
 
@@ -670,6 +673,8 @@ class KlipyPalettesView @JvmOverloads constructor(
                 if (newState == RecyclerView.SCROLL_STATE_IDLE) {
                     page.pinnedAdapter.setAnimationsRunning(true)
                     page.historyAdapter.setAnimationsRunning(true)
+                    // Re-sync spans when scrolling stops (pairs with GAP_HANDLING_NONE).
+                    (recyclerView.layoutManager as? StaggeredGridLayoutManager)?.invalidateSpanAssignments()
                 } else {
                     page.pinnedAdapter.setAnimationsRunning(false)
                     page.historyAdapter.setAnimationsRunning(false)
@@ -702,14 +707,18 @@ class KlipyPalettesView @JvmOverloads constructor(
         if (isLoadingMore || !hasMorePages || searchQuery.isBlank()) return
         if (!CloudManager.isFeatureAllowed(context, CloudManager.CloudFeature.KLIPY_MEDIA)) return
         val tabAtRequest = currentTab
+        val queryAtRequest = searchQuery
+        val pageAtRequest = ++currentPage
         isLoadingMore = true
-        currentPage++
 
         viewScope.launch {
             try {
                 val (results, hasMore) = withContext(Dispatchers.IO) {
-                    fetchSearchResults(searchQuery, currentPage, tabAtRequest)
+                    fetchSearchResults(queryAtRequest, pageAtRequest, tabAtRequest)
                 }
+
+                // Drop stale pages: user typed a new query or switched tab while loading.
+                if (queryAtRequest != searchQuery || tabAtRequest != currentTab) return@launch
 
                 hasMorePages = hasMore
 
@@ -720,6 +729,8 @@ class KlipyPalettesView @JvmOverloads constructor(
                         val activeAdapter = if (tabAtRequest == KlipyHistoryDao.TYPE_GIF) gifsAdapter else stickersAdapter
                         activeAdapter.updateItems(currentList.toList())
                     }
+                } else {
+                    hasMorePages = false
                 }
             } finally {
                 isLoadingMore = false
@@ -1243,7 +1254,7 @@ class KlipyPalettesView @JvmOverloads constructor(
 
             hasMorePages = hasMore
 
-            if (currentTab != tabAtRequest) return@launch
+            if (currentTab != tabAtRequest || query != searchQuery) return@launch
 
             loadingIndicator.visibility = View.GONE
             val activeAdapter = if (tabAtRequest == KlipyHistoryDao.TYPE_GIF) gifsAdapter else stickersAdapter
@@ -1251,7 +1262,15 @@ class KlipyPalettesView @JvmOverloads constructor(
             setHistorySectionsVisible(tabAtRequest, showPinned = false, showHistoryHeading = false)
 
             val activeRecyclerView = if (tabAtRequest == KlipyHistoryDao.TYPE_GIF) gifsRecyclerView else stickersRecyclerView
-            activeRecyclerView.scrollToPosition(0)
+            activeRecyclerView.post {
+                // Never scroll while the list is mid-layout or still settling from a fling.
+                if (activeRecyclerView.isComputingLayout
+                    || activeRecyclerView.scrollState != RecyclerView.SCROLL_STATE_IDLE
+                ) return@post
+                if (activeRecyclerView.adapter?.itemCount ?: 0 > 0) {
+                    activeRecyclerView.scrollToPosition(0)
+                }
+            }
 
             if (results.isEmpty()) {
                 emptyState.text = context.getString(R.string.no_results_found)
